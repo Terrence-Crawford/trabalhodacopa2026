@@ -1,160 +1,68 @@
 import pandas as pd
 import numpy as np
 
-def calculate_form(matches_df, team_name, n_games=10):
-    """Calcula o aproveitamento percentual de pontos nos últimos N jogos."""
-    # Filtra partidas onde o time jogou (padrão de colunas comum em APIs)
-    team_matches = matches_df[(matches_df['home_team'] == team_name) | (matches_df['away_team'] == team_name)]
+def calcular_força_historica(matches_df, n_anos=10):
+    """
+    Calcula o Elo histórico removendo jogos futuros/NAs do all_matches.csv
+    """
+    df_recente = matches_df.copy()
+    df_recente['date'] = pd.to_datetime(df_recente['date'])
     
-    if 'date' in team_matches.columns:
-        team_matches = team_matches.sort_values(by='date', ascending=False)
-        
-    recent_games = team_matches.head(n_games)
+    # 1. Filtro de tempo (últimos 10 anos)
+    limite_data = df_recente['date'].max() - pd.DateOffset(years=n_anos)
+    df_recente = df_recente[df_recente['date'] >= limite_data].copy()
     
-    if recent_games.empty:
-        return 0.5
+    # 2. LIMPEZA CRUCIAL: Remove jogos futuros (onde o placar é NA)
+    df_recente = df_recente.dropna(subset=['home_score', 'away_score'])
+    
+    # Converte placares para inteiros para evitar problemas de tipo
+    df_recente['home_score'] = df_recente['home_score'].astype(int)
+    df_recente['away_score'] = df_recente['away_score'].astype(int)
+    
+    times = set(df_recente['home_team'].unique()).union(set(df_recente['away_team'].unique()))
+    elo_dict = {time: 1500.0 for time in times}
+    
+    K = 32
+    for _, row in df_recente.sort_values('date').iterrows():
+        t1, t2 = row['home_team'], row['away_team']
+        g1, g2 = row['home_score'], row['away_score']
         
-    points = 0
-    for _, match in recent_games.iterrows():
-        if match['home_team'] == team_name:
-            if match['home_score'] > match['away_score']: 
-                points += 1
-            elif match['home_score'] == match['away_score']: 
-                points += 0.5
+        elo1, elo2 = elo_dict[t1], elo_dict[t2]
+        exp1 = 1 / (1 + 10 ** ((elo2 - elo1) / 400))
+        exp2 = 1 - exp1
+        
+        if g1 > g2:
+            res1, res2 = 1.0, 0.0
+        elif g1 < g2:
+            res1, res2 = 0.0, 1.0
         else:
-            if match['away_score'] > match['home_score']: 
-                points += 1
-            elif match['home_score'] == match['away_score']: 
-                points += 0.5
-                
-    return points / len(recent_games)
-
-
-def calculate_defense_and_attack(matches_df, team_name, n_games=10):
-    """Retorna a média de gols pró (ataque) e gols sofridos (defesa) do histórico recente."""
-    team_matches = matches_df[(matches_df['home_team'] == team_name) | (matches_df['away_team'] == team_name)]
-    
-    if 'date' in team_matches.columns:
-        team_matches = team_matches.sort_values(by='date', ascending=False)
-        
-    recent_games = team_matches.head(n_games)
-    
-    if recent_games.empty:
-        return 0.0, 0.0
-        
-    scored = 0
-    conceded = 0
-    
-    for _, match in recent_games.iterrows():
-        if match['home_team'] == team_name:
-            scored += match['home_score']
-            conceded += match['away_score']
-        else:
-            scored += match['away_score']
-            conceded += match['home_score']
+            res1, res2 = 0.5, 0.5
             
-    return (scored / len(recent_games)), (conceded / len(recent_games))
-
-
-def extract_squad_advanced_metrics(df_api_stats, team_name):
-    """
-    Extrai os indicadores consolidados da seleção vindos das tabelas da API:
-    Elo, Ranking FIFA, Estilo de Jogo (Posse/Agressividade) e Valor de Mercado Médio.
-    """
-    try:
-        team_data = df_api_stats.loc[df_api_stats['team'] == team_name].iloc[0]
-        elo_val = team_data.get('elo', 1500)
-        fifa_rank = team_data.get('ranking_fifa', 50)
-        estilo_jogo = team_data.get('estilo_jogo', 5.0) # Ex: Média de posse de bola ou finalizações
-        valor_medio = team_data.get('valor_medio_jogador', 10.0) # Valor em milhões
-    except (IndexError, KeyError):
-        # Valores padrão neutros para seleções ausentes na amostragem
-        elo_val = 1500
-        fifa_rank = 50
-        estilo_jogo = 5.0
-        valor_medio = 10.0
+        elo_dict[t1] = elo1 + K * (res1 - exp1)
+        elo_dict[t2] = elo2 + K * (res2 - exp2)
         
-    return elo_val, fifa_rank, estilo_jogo, valor_medio
+    return elo_dict
 
-
-def gerar_vetor_confronto(team_a, team_b, matches_df, df_api_stats):
-    """Gera o vetor de diferenças técnicas brutas (A - B) para alimentar o modelo e gráficos."""
-    # 1. Métricas de Momento (Últimos jogos)
-    form_a = calculate_form(matches_df, team_a)
-    form_b = calculate_form(matches_df, team_b)
-    
-    # 2. Ataque e Defesa (Médias de gols)
-    ataque_a, defesa_a = calculate_defense_and_attack(matches_df, team_a)
-    ataque_b, defesa_b = calculate_defense_and_attack(matches_df, team_b)
-    
-    # 3. Métricas Estruturais da API (Elo, FIFA, Estilo, Valor)
-    elo_a, fifa_a, estilo_a, valor_a = extract_squad_advanced_metrics(df_api_stats, team_a)
-    elo_b, fifa_b, estilo_b, valor_b = extract_squad_advanced_metrics(df_api_stats, team_b)
-    
-    # Retorna o dicionário de features diferenciais relacionando as variáveis solicitadas
-    return {
-        'dif_aproveitamento': form_a - form_b,
-        'dif_gols_marcados': ataque_a - ataque_b,
-        'dif_defesa_gols_sofridos': defesa_a - defesa_b, # Valores negativos indicam melhor defesa para A
-        'dif_elo': elo_a - elo_b,
-        'dif_ranking_fifa': fifa_b - fifa_a, # Invertido pois menor ranking na FIFA significa time melhor
-        'dif_estilo_jogo': estilo_a - estilo_b,
-        'dif_valor_medio_elenco': valor_a - valor_b
-    }
-
-def simular_confronto_direto(time, adversario, df):
+def extrair_metricas_elenco(players_df, team_name):
     """
-    Compara dois times usando as variáveis disponíveis
-    e conta quantas vantagens cada um possui.
+    Busca o OVR dos jogadores no male_players.csv
     """
+    squad = players_df[players_df['Nation'] == team_name]
+    if squad.empty:
+        return 70.0, 0
+        
+    top_11 = squad.sort_values(by='OVR', ascending=False).head(11)
+    return float(top_11['OVR'].mean()), int(len(squad[squad['OVR'] >= 85]))
 
-    dados_time = df.loc[time]
-    dados_adv = df.loc[adversario]
-
-    vantagens_time = 0
-    vantagens_adv = 0
-
-
-    # Elo maior indica maior força histórica
-    if dados_time['elo'] > dados_adv['elo']:
-        vantagens_time += 1
-    else:
-        vantagens_adv += 1
-
-
-    # Ranking FIFA menor é melhor
-    if dados_time['ranking_fifa'] < dados_adv['ranking_fifa']:
-        vantagens_time += 1
-    else:
-        vantagens_adv += 1
-
-
-    # Estilo de jogo
-    if dados_time['estilo_jogo'] > dados_adv['estilo_jogo']:
-        vantagens_time += 1
-    else:
-        vantagens_adv += 1
-
-
-    # Defesa: menor número significa melhor defesa
-    if dados_time['defesa'] < dados_adv['defesa']:
-        vantagens_time += 1
-    else:
-        vantagens_adv += 1
-
-
-    # Valor do elenco
-    if dados_time['valor_elenco_milhoes'] > dados_adv['valor_elenco_milhoes']:
-        vantagens_time += 1
-    else:
-        vantagens_adv += 1
-
-
-    # Forma recente
-    if dados_time['aproveitamento_recente'] > dados_adv['aproveitamento_recente']:
-        vantagens_time += 1
-    else:
-        vantagens_adv += 1
-
-
-    return vantagens_time, vantagens_adv
+def obter_pontos_fifa(ranking_df, team_name):
+    """
+    Busca a última pontuação de pontos FIFA do fifa_ranking_2024.csv
+    """
+    pais_df = ranking_df[ranking_df['country_full'] == team_name]
+    if pais_df.empty:
+        return 1300.0
+        
+    pais_df = pais_df.copy()
+    pais_df['rank_date'] = pd.to_datetime(pais_df['rank_date'])
+    linha_recente = pais_df.sort_values(by='rank_date', ascending=False).iloc[0]
+    return float(linha_recente['total_points'])
